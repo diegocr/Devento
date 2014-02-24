@@ -198,17 +198,68 @@ let m$ = {
 						
 						s = s.QueryInterface(Ci.nsIScriptError);
 						
-						if(!~['CSS Parser',"content javascript"].indexOf(s.category) && !this.cwskipf(s.sourceName)) {
+						if(addon.branch.getBoolPref('fctow')
+						&& !~['CSS Parser',"content javascript"].indexOf(s.category)
+						&& !this.cwskipf(s.sourceName)) {
 							
 							this.log(s.errorMessage || s.message, s.category,
 								s.sourceName.replace(/^.*->/,'')+':'+s.lineNumber);
 						}
 						
 					} catch(e) {}
+					
+					if(addon.branch.getBoolPref('remotelog')) PUSH(s);
 				}
 		}
 	}
 };
+
+let __push_queue;
+function PUSH(s) {
+	s = new Date(s.timeStamp || Date.now()).toISOString().split('T').pop() + ' ' + s;
+	if(__push_queue) {
+		__push_queue.push(s);
+	} else {
+		__push_queue = [s];
+		Services.tm.currentThread.dispatch(PUSHdsp, Ci.nsIEventTarget.DISPATCH_NORMAL)
+	}
+}
+function PUSHdsp() {
+	if(!addon.sockid) try {
+		let rl = addon.branch.getCharPref('remoteloghost').split(":");
+		addon.sockid = Cc["@mozilla.org/network/socket-transport-service;1"]
+			.getService(Ci.nsISocketTransportService)
+			.createTransport(null, 0, rl[0], parseInt(rl[1] || 9999), null)
+			.openOutputStream(0,0,0);
+		let helo = 'Hi, this is ' + [
+			Services.appinfo.vendor,
+			Services.appinfo.name,
+			Services.appinfo.platformVersion,
+			Services.appinfo.platformBuildID,
+			Services.appinfo.OS,
+			Services.appinfo.XPCOMABI].join(" ") + "\r\n";
+		addon.sockid.write(helo,helo.length);
+	} catch(e) {
+		if(e.result != 0x804b000d) {
+			Cu.reportError(e);
+		}
+		delete addon.sockid;
+		return;
+	}
+	
+	let q = __push_queue.join("\n") + "\r\n";
+	__push_queue = null;
+	
+	try {
+		addon.sockid.write(q,q.length);
+	} catch(e) {
+		try {
+			addon.sockid.close();
+		} catch(e) {}
+		delete addon.sockid;
+		Cu.reportError(e);
+	}
+}
 
 function getBrowser(w) {
 	
@@ -257,6 +308,10 @@ function startup(data) {
 		
 		DeventoSetup();
 		
+		['fctow','remotelog'].forEach(
+			n => addon.branch.getPrefType(n)
+				|| addon.branch.setBoolPref(n,!1));
+		
 		AddonManager.addAddonListener(m$);
 		Services.console.registerListener(m$,!0);
 		
@@ -266,6 +321,13 @@ function startup(data) {
 
 function shutdown(data, reason) {
 	DeventoCleanup(reason);
+	if(addon.sockid) {
+		try {
+			let bye = ("000" + reason).slice(-4) + ' Bye!\r\n\n';
+			addon.sockid.write(bye,bye.length);
+			addon.sockid.close();
+		} catch(e) {}
+	}
 	
 	if(reason == APP_SHUTDOWN)
 		return;
